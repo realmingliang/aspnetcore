@@ -2,6 +2,11 @@
 // https://github.com/microsoft/vscode-dev-containers/tree/v0.177.0/containers/dotnet
 {
   "name": "C# (.NET)",
+  "features": {
+    "ghcr.io/devcontainers/features/sshd:1": {
+        "version": "latest"
+    },
+  },
   "build": {
     "dockerfile": "Dockerfile",
     "args": {
@@ -16,6 +21,7 @@
       "NODE_VERSION": "lts/*"
     }
   },
+
   // Add the IDs of extensions you want installed when the container is created.
   "extensions": [
     "ms-dotnettools.csharp",
