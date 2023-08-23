@@ -13,6 +13,7 @@ using MessagePack.Formatters;
 using MessagePack.Resolvers;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Connections;
+using Microsoft.AspNetCore.Connections.Abstractions;
 using Microsoft.AspNetCore.Connections.Features;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Http.Connections.Features;
@@ -4916,6 +4917,138 @@ public partial class HubConnectionHandlerTests : VerifiableLoggedTest
     }
 
     [Fact]
+    public async Task KeyedServiceResolvedIfInDI()
+    {
+        var serviceProvider = HubConnectionHandlerTestUtils.CreateServiceProvider(provider =>
+        {
+            provider.AddSignalR(options =>
+            {
+                options.EnableDetailedErrors = true;
+            });
+
+            provider.AddKeyedScoped<Service1>("service1");
+        });
+        var connectionHandler = serviceProvider.GetService<HubConnectionHandler<ServicesHub>>();
+
+        using (var client = new TestClient())
+        {
+            var connectionHandlerTask = await client.ConnectAsync(connectionHandler).DefaultTimeout();
+            var res = await client.InvokeAsync(nameof(ServicesHub.KeyedService)).DefaultTimeout();
+            Assert.Equal(43L, res.Result);
+        }
+    }
+
+    [Fact]
+    public async Task HubMethodCanInjectKeyedServiceWithOtherParameters()
+    {
+        var serviceProvider = HubConnectionHandlerTestUtils.CreateServiceProvider(provider =>
+        {
+            provider.AddSignalR(options =>
+            {
+                options.EnableDetailedErrors = true;
+            });
+
+            provider.AddKeyedScoped<Service1>("service1");
+        });
+        var connectionHandler = serviceProvider.GetService<HubConnectionHandler<ServicesHub>>();
+
+        using (var client = new TestClient())
+        {
+            var connectionHandlerTask = await client.ConnectAsync(connectionHandler).DefaultTimeout();
+            var res = await client.InvokeAsync(nameof(ServicesHub.KeyedServiceWithParam), 91).DefaultTimeout();
+            Assert.Equal(1183L, res.Result);
+        }
+    }
+
+    [Fact]
+    public async Task HubMethodCanInjectKeyedServiceWithNonKeyedService()
+    {
+        var serviceProvider = HubConnectionHandlerTestUtils.CreateServiceProvider(provider =>
+        {
+            provider.AddSignalR(options =>
+            {
+                options.EnableDetailedErrors = true;
+            });
+
+            provider.AddKeyedScoped<Service1>("service1");
+            provider.AddScoped<Service2>();
+        });
+        var connectionHandler = serviceProvider.GetService<HubConnectionHandler<ServicesHub>>();
+
+        using (var client = new TestClient())
+        {
+            var connectionHandlerTask = await client.ConnectAsync(connectionHandler).DefaultTimeout();
+            var res = await client.InvokeAsync(nameof(ServicesHub.KeyedServiceNonKeyedService)).DefaultTimeout();
+            Assert.Equal(11L, res.Result);
+        }
+    }
+
+    [Fact]
+    public async Task MultipleKeyedServicesResolved()
+    {
+        var serviceProvider = HubConnectionHandlerTestUtils.CreateServiceProvider(provider =>
+        {
+            provider.AddSignalR(options =>
+            {
+                options.EnableDetailedErrors = true;
+            });
+
+            provider.AddKeyedScoped<Service1>("service1");
+            provider.AddKeyedScoped<Service1>("service2");
+        });
+        var connectionHandler = serviceProvider.GetService<HubConnectionHandler<ServicesHub>>();
+
+        using (var client = new TestClient())
+        {
+            var connectionHandlerTask = await client.ConnectAsync(connectionHandler).DefaultTimeout();
+            var res = await client.InvokeAsync(nameof(ServicesHub.MultipleKeyedServices)).DefaultTimeout();
+            Assert.Equal(45L, res.Result);
+        }
+    }
+
+    [Fact]
+    public async Task MultipleKeyedServicesWithSameNameResolved()
+    {
+        var serviceProvider = HubConnectionHandlerTestUtils.CreateServiceProvider(provider =>
+        {
+            provider.AddSignalR(options =>
+            {
+                options.EnableDetailedErrors = true;
+            });
+
+            provider.AddKeyedScoped<Service1>("service1");
+        });
+        var connectionHandler = serviceProvider.GetService<HubConnectionHandler<ServicesHub>>();
+
+        using (var client = new TestClient())
+        {
+            var connectionHandlerTask = await client.ConnectAsync(connectionHandler).DefaultTimeout();
+            var res = await client.InvokeAsync(nameof(ServicesHub.MultipleSameKeyedServices)).DefaultTimeout();
+            Assert.Equal(445L, res.Result);
+        }
+    }
+
+    [Fact]
+    public async Task KeyedServiceNotResolvedIfNotInDI()
+    {
+        var serviceProvider = HubConnectionHandlerTestUtils.CreateServiceProvider(provider =>
+        {
+            provider.AddSignalR(options =>
+            {
+                options.EnableDetailedErrors = true;
+            });
+        });
+        var connectionHandler = serviceProvider.GetService<HubConnectionHandler<ServicesHub>>();
+
+        using (var client = new TestClient())
+        {
+            var connectionHandlerTask = await client.ConnectAsync(connectionHandler).DefaultTimeout();
+            var res = await client.InvokeAsync(nameof(ServicesHub.KeyedService)).DefaultTimeout();
+            Assert.Equal("Failed to invoke 'KeyedService' due to an error on the server. InvalidDataException: Invocation provides 0 argument(s) but target expects 1.", res.Error);
+        }
+    }
+
+    [Fact]
     public void TooManyParametersWithServiceThrows()
     {
         var serviceProvider = HubConnectionHandlerTestUtils.CreateServiceProvider(provider =>
@@ -5035,6 +5168,178 @@ public partial class HubConnectionHandlerTests : VerifiableLoggedTest
             var completionMessage = await client.InvokeAsync(nameof(MethodHub.Echo), new object[] { "test" });
 
             Assert.Equal("test", completionMessage.Result);
+        }
+    }
+
+    [Fact]
+    public async Task CanSetMessageBufferSizeOnServer()
+    {
+        var serviceProvider = HubConnectionHandlerTestUtils.CreateServiceProvider(provider =>
+        {
+            provider.AddSignalR(options =>
+            {
+                options.EnableDetailedErrors = true;
+                options.StatefulReconnectBufferSize = 500;
+            });
+        });
+        var connectionHandler = serviceProvider.GetService<HubConnectionHandler<MethodHub>>();
+
+        using (var client = new TestClient())
+        {
+#pragma warning disable CA2252 // This API requires opting into preview features
+            client.Connection.Features.Set<IStatefulReconnectFeature>(new EmptyReconnectFeature());
+#pragma warning restore CA2252 // This API requires opting into preview features
+            var connectionHandlerTask = await client.ConnectAsync(connectionHandler).DefaultTimeout();
+
+            await client.InvokeAsync(nameof(MethodHub.Echo), new object[] { new string('x', 500) }).DefaultTimeout();
+
+            // Previous message filled buffer, this message will not send to client until buffer is reduced via Ack
+            await client.SendInvocationAsync(nameof(MethodHub.Echo), new object[] { "t" }).DefaultTimeout();
+
+            var readTask = client.ReadAsync();
+            Assert.False(readTask.IsCompleted);
+
+            // Remove large message from buffer
+            await client.SendHubMessageAsync(new AckMessage(1)).DefaultTimeout();
+
+            var completionMessage = Assert.IsType<CompletionMessage>(await readTask);
+
+            Assert.Equal("t", completionMessage.Result);
+        }
+    }
+
+#pragma warning disable CA2252 // This API requires opting into preview features
+    private class EmptyReconnectFeature : IStatefulReconnectFeature
+    {
+        public void OnReconnected(Func<PipeWriter, Task> notifyOnReconnect) { }
+
+        public void DisableReconnect()
+        {
+            throw new NotImplementedException();
+        }
+    }
+#pragma warning restore CA2252 // This API requires opting into preview features
+
+    [Fact]
+    public async Task IReconnectNotifyTriggersSequenceMessage()
+    {
+        using (StartVerifiableLog())
+        {
+            var state = new ConnectionLifetimeState();
+            var serviceProvider = HubConnectionHandlerTestUtils.CreateServiceProvider(s => s.AddSingleton(state), LoggerFactory);
+            var connectionHandler = serviceProvider.GetService<HubConnectionHandler<ConnectionLifetimeHub>>();
+
+            using var client = new TestClient();
+            var reconnectFeature = new TestReconnectFeature();
+#pragma warning disable CA2252 // This API requires opting into preview features
+            client.Connection.Features.Set<IStatefulReconnectFeature>(reconnectFeature);
+#pragma warning restore CA2252 // This API requires opting into preview features
+
+            var connectionHandlerTask = await client.ConnectAsync(connectionHandler);
+            UpdateConnectionPair(client.Connection);
+
+            await reconnectFeature.NotifyOnReconnect(client.Connection.Transport.Output);
+
+            var seqMessage = Assert.IsType<SequenceMessage>(await client.ReadAsync().DefaultTimeout());
+            Assert.Equal(1, seqMessage.SequenceId);
+
+            await client.SendHubMessageAsync(new SequenceMessage(1)).DefaultTimeout();
+
+            await client.SendHubMessageAsync(new CloseMessage(error: null));
+
+            await connectionHandlerTask.DefaultTimeout();
+
+            Assert.Null(state.DisconnectedException);
+        }
+    }
+
+    public struct DuplexPipePair
+    {
+        public IDuplexPipe Transport { get; set; }
+        public IDuplexPipe Application { get; set; }
+
+        public DuplexPipePair(IDuplexPipe transport, IDuplexPipe application)
+        {
+            Transport = transport;
+            Application = application;
+        }
+    }
+
+    private static void UpdateConnectionPair(DefaultConnectionContext connection)
+    {
+        var prevPipe = connection.Application.Input;
+        var input = new Pipe();
+
+        // Add new pipe for reading from and writing to transport from app code
+        var transportToApplication = new DuplexPipe(connection.Transport.Input, input.Writer);
+        var applicationToTransport = new DuplexPipe(input.Reader, connection.Application.Output);
+
+        connection.Application = applicationToTransport;
+        connection.Transport = transportToApplication;
+
+        connection.Transport = connection.Transport;
+
+        // Close previous pipe with specific error that application code can catch to know a restart is occurring
+        prevPipe.Complete(new ConnectionResetException(""));
+    }
+
+    [Fact]
+    public async Task GracefulCloseDisablesReconnect()
+    {
+        using (StartVerifiableLog())
+        {
+            var state = new ConnectionLifetimeState();
+            var serviceProvider = HubConnectionHandlerTestUtils.CreateServiceProvider(s => s.AddSingleton(state), LoggerFactory);
+            var connectionHandler = serviceProvider.GetService<HubConnectionHandler<ConnectionLifetimeHub>>();
+
+            using var client = new TestClient();
+
+            var reconnectFeature = new TestReconnectFeature();
+#pragma warning disable CA2252 // This API requires opting into preview features
+            client.Connection.Features.Set<IStatefulReconnectFeature>(reconnectFeature);
+#pragma warning restore CA2252 // This API requires opting into preview features
+
+            var connectionHandlerTask = await client.ConnectAsync(connectionHandler);
+
+            await client.SendHubMessageAsync(new CloseMessage(error: null));
+
+            await reconnectFeature.ReconnectDisabled.DefaultTimeout();
+
+            var message = Assert.IsType<CloseMessage>(await client.ReadAsync().DefaultTimeout());
+            Assert.Null(message.Error);
+
+            await connectionHandlerTask.DefaultTimeout();
+
+            Assert.Null(state.DisconnectedException);
+        }
+    }
+
+#pragma warning disable CA2252 // This API requires opting into preview features
+    private class TestReconnectFeature : IStatefulReconnectFeature
+#pragma warning restore CA2252 // This API requires opting into preview features
+    {
+        private TaskCompletionSource _reconnectDisabled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        private Func<PipeWriter, Task> _notifyOnReconnect;
+
+        public Task ReconnectDisabled => _reconnectDisabled.Task;
+
+        public Task NotifyOnReconnect(PipeWriter writer)
+        {
+            return _notifyOnReconnect(writer);
+        }
+
+#pragma warning disable CA2252 // This API requires opting into preview features
+        public void OnReconnected(Func<PipeWriter, Task> notifyOnReconnect)
+        {
+            _notifyOnReconnect = notifyOnReconnect;
+        }
+#pragma warning restore CA2252 // This API requires opting into preview features
+
+#pragma warning disable CA2252 // This API requires opting into preview features
+        public void DisableReconnect()
+#pragma warning restore CA2252 // This API requires opting into preview features
+        {
+            _reconnectDisabled.TrySetResult();
         }
     }
 
